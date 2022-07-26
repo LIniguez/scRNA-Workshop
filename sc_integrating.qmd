@@ -1,0 +1,205 @@
+---
+title: "sc_integration"
+format: html
+editor: visual
+---
+
+```{r Setup,message=FALSE,warning=FALSE}
+
+if (!require("BiocManager", quietly = TRUE))
+    install.packages("BiocManager")
+if (!require("pacman", quietly = TRUE))
+    BiocManager::install("pacman")
+p_load("SingleCellExperiment")
+p_load("Seurat")
+p_load("hdf5r")
+p_load("DropletUtils")
+p_load("dplyr")
+p_load("scater")
+p_load("Matrix")
+p_load("scran")
+p_load("ggplot2")
+p_load("igraph")
+p_load("SingleR")
+p_load("celldex")
+p_load("iSEE")
+p_load("Nebulosa")
+p_load("UpSetR")
+p_load("clustree")
+p_load("Rmagic")
+p_load("SeuratWrappers")
+#p_load("harmony")
+
+if (!require("devtools"))
+install.packages("devtools")
+if(!require("findPC"))
+devtools::install_github("haotian-zhuang/findPC")
+if(!require("SeuratWrappers"))
+remotes::install_github('satijalab/seurat-wrappers')
+
+```
+
+## Data Integration
+
+#### Pre-process
+
+```{r}
+if(!file.exists("pbmc_1k_v2_filtered_feature_bc_matrix.tar.gz")){
+system("wget -q https://cf.10xgenomics.com/samples/cell-exp/3.0.0/pbmc_1k_v2/pbmc_1k_v2_filtered_feature_bc_matrix.tar.gz && tar xzvf pbmc_1k_v2_filtered_feature_bc_matrix.tar.gz && mkdir -p chem2 && mv filtered_feature_bc_matrix chem2")}
+if(!file.exists("pbmc_1k_v3_filtered_feature_bc_matrix.tar.gz")){
+system("wget -q https://cf.10xgenomics.com/samples/cell-exp/3.0.0/pbmc_1k_v3/pbmc_1k_v3_filtered_feature_bc_matrix.tar.gz && tar xzvf pbmc_1k_v3_filtered_feature_bc_matrix.tar.gz && mkdir -p chem3 && mv filtered_feature_bc_matrix chem3")}
+
+
+mat<-Seurat::Read10X(data.dir = "chem2/filtered_feature_bc_matrix/")
+chem2<- CreateSeuratObject(counts = mat, project = "chem2", min.cells = 0, min.features =0)
+mat<-Seurat::Read10X(data.dir =  "chem3/filtered_feature_bc_matrix/")
+chem3<- CreateSeuratObject(counts = mat, project = "chem3", min.cells = 0, min.features =0)
+
+
+chem2[["Mitochondrial"]] <- PercentageFeatureSet(chem2, pattern = "^MT-")
+qc.lib2 <- scater::isOutlier(chem2$nCount_RNA, log=TRUE, type="lower",nmads=3) #sce_data$sum
+qc.nexprs2 <- isOutlier(chem2$nFeature_RNA, log=TRUE,nmads=3, type="lower") #sce_data$detected
+qc.mito2 <- isOutlier(chem2$Mitochondrial ,nmads=3,type="higher") #sce_data$subsets_Mitochondrial_percent
+discard2 <- qc.lib2 | qc.nexprs2  | qc.mito2
+chem2$discard<-discard2
+chem2<-subset(chem2,subset= discard!=TRUE)
+
+chem3[["Mitochondrial"]] <- PercentageFeatureSet(chem3, pattern = "^MT-")
+qc.lib2 <- scater::isOutlier(chem3$nCount_RNA, log=TRUE, type="lower",nmads=3) #sce_data$sum
+qc.nexprs2 <- isOutlier(chem3$nFeature_RNA, log=TRUE,nmads=3, type="lower") #sce_data$detected
+qc.mito2 <- isOutlier(chem3$Mitochondrial ,nmads=3,type="higher") #sce_data$subsets_Mitochondrial_percent
+discard2 <- qc.lib2 | qc.nexprs2  | qc.mito2
+chem3$discard<-discard2
+chem3<-subset(chem3,subset= discard!=TRUE)
+```
+
+#### Join Cells
+
+```{r}
+seurat_data_merged<-merge(chem2,chem3,add.cell.ids = c("V2", "V3"), project = "merged")
+seurat_data_merged <- NormalizeData(seurat_data_merged, normalization.method = "LogNormalize", scale.factor = 10000, verbose=F)
+seurat_data_merged <- FindVariableFeatures(seurat_data_merged, assay="RNA",selection.method = "vst", nfeatures = 2000, verbose=F)
+seurat_data_merged <- ScaleData(seurat_data_merged, features = rownames(seurat_data_merged))
+seurat_data_merged <- RunPCA(seurat_data_merged,
+                      features = VariableFeatures(object = seurat_data_merged),
+                      verbose = F,npcs = 50)
+seurat_data_merged <- RunUMAP(seurat_data_merged,reduction = "pca",verbose = F,dims = 1:11)
+DimPlot(seurat_data_merged, reduction = "umap",group.by = "orig.ident")
+
+```
+
+#### Integration Seurat
+
+```{r}
+
+seurat.list<-list(chem2,chem3)
+
+seurat.list <- lapply(X = seurat.list, FUN = function(x) {
+    x <- NormalizeData(x,verbose=F)
+    x <- FindVariableFeatures(x, selection.method = "vst", nfeatures = 2000,verbose=F)
+})
+
+# select features that are repeatedly variable across datasets for integration
+features <- SelectIntegrationFeatures(object.list = seurat.list)
+
+head(features)
+length(features)
+```
+
+```{r}
+anchors <- FindIntegrationAnchors(object.list = seurat.list, anchor.features = features,verbose = F)
+seurat_combined <- IntegrateData(anchorset = anchors)
+```
+
+```{r}
+
+seurat_combined <- ScaleData(seurat_combined, features = rownames(seurat_combined))
+seurat_combined <- RunPCA(seurat_combined,
+                      features = VariableFeatures(object = seurat_combined),
+                      verbose = F,npcs = 50)
+seurat_combined <- RunUMAP(seurat_combined,reduction = "pca",verbose = F,dims = 1:11)
+seurat_combined <- FindNeighbors(seurat_combined, reduction = "pca", dims = 1:30)
+seurat_combined <- FindClusters(seurat_combined, resolution = 0.5)
+
+DimPlot(seurat_combined, reduction = "umap",group.by = "orig.ident")
+```
+
+```{r}
+DimPlot(seurat_combined, reduction = "umap", split.by = "orig.ident")
+```
+
+```{r}
+seurat_combined
+```
+
+::: callout-important
+## Important
+
+Integrated values should not be used for marker identification. It is important, in case of Seurat Object, to set the default assay again as the normalized values.
+:::
+
+#### Integration Harmony
+
+```{r}
+
+seurat_data_harmony<-harmony::RunHarmony(seurat_data_merged,group.by.vars = "orig.ident")
+seurat_data_harmony <- RunUMAP(seurat_data_harmony,reduction = "harmony",verbose = F,dims = 1:11)
+DimPlot(seurat_data_harmony, reduction = "umap",group.by = "orig.ident")
+```
+
+### Evaluating integration
+
+```{r}
+seurat.list <- lapply(X = seurat.list, FUN = function(x) {
+    x<- ScaleData(x, features = rownames(x))
+    x <- RunPCA(x,features = VariableFeatures(object = x),
+                      verbose = F,npcs = 50)
+    x <- RunUMAP(x,reduction = "pca",verbose = F,dims = 1:11)
+    x <- FindNeighbors(x, reduction = "pca", dims = 1:30)
+    x <- FindClusters(x, resolution = 0.5)
+    x <- FindVariableFeatures(x, selection.method = "vst", nfeatures = 2000,verbose=F)
+})
+
+```
+
+```{r}
+tab<- data.frame(before=seurat.list[[1]]$seurat_clusters, after=seurat_combined[,colnames(seurat.list[[1]])][[]]$seurat_clusters) %>% table()
+pheatmap::pheatmap(log2(tab+1), color=colorRampPalette(c("white", "blue"))(101),cluster_rows = F,cluster_cols = F)
+
+tab<- data.frame(before=seurat.list[[2]]$seurat_clusters, after=seurat_combined[,colnames(seurat.list[[2]])][[]]$seurat_clusters) %>% table()
+pheatmap::pheatmap(log2(tab+1), color=colorRampPalette(c("white", "blue"))(101),cluster_rows = F,cluster_cols = F)
+```
+
+```{r}
+DefaultAssay(seurat_combined) <- "RNA"
+Idents(seurat_combined) <- seurat_combined$seurat_clusters
+
+conserved.markers <- FindConservedMarkers(seurat_combined, ident.1 = 0, grouping.var = "orig.ident", verbose = FALSE)
+
+head(conserved.markers)
+```
+
+## Differential Expression
+
+```{r}
+seurat_combined$clust_orig.ident<- paste(seurat_combined$seurat_clusters,seurat_combined$orig.ident, sep = "_")
+Idents(seurat_combined) <- "clust_orig.ident"
+dfex_clust0<- FindMarkers(seurat_combined, ident.1 = "0_chem2", ident.2 = "0_chem3", verbose = FALSE,only.pos = F)
+head(dfex_clust0, n = 15)
+VlnPlot(seurat_combined, features = "CRIP1", split.plot = T,split.by = "orig.ident", group.by = "seurat_clusters",pt.size = 0.2)
+
+```
+
+```{r}
+seurat_combined@assays$RNA@data["SUB1",] %>% as_tibble(rownames = "Cell") %>% left_join(as_tibble(seurat_combined[[]], rownames="Cell"), by=c("Cell")) %>%
+  filter(seurat_clusters==0)%>%
+    ggplot(aes(x=seurat_clusters, y=value))+geom_violin(aes(fill=orig.ident),scale = "width", adjust=1)
+    #ggbeeswarm::geom_quasirandom(size=0.1)+
+  #theme(legend.position = "none")
+
+VlnPlot(seurat_combined, features = "ISG15", group.by = "seurat_clusters",pt.size = 0.2,fill.by = "orig.ident",)
+```
+
+```{r}
+remotes::install_github("Oshlack/speckle")
+```

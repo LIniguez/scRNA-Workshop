@@ -1,0 +1,10 @@
+.Rproj.user
+.Rhistory
+.RData
+.Ruserdata
+/.quarto/
+/_site/
+seurat_withMagic_ALRA.RDS
+scRNA-Workshop.Rproj
+_freeze/
+

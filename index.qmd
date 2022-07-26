@@ -1,0 +1,10 @@
+---
+title: "SingleCell RNA-seq Workshop"
+format: html
+editor: visual
+---
+
+This workshop was presented to the Irimia's Group at CRG in Barcelona on June/July 2022
+
+
+## [Slides can be found HERE](https://docs.google.com/presentation/d/1ER7fkW7oyBnoZ2dJBYBHY_Ckr3EiyjVdpq_KgdpHKnQ/edit?usp=sharing)

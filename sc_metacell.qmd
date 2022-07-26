@@ -1,0 +1,118 @@
+---
+title: "SC_metacells"
+format: html
+editor: visual
+---
+
+```{r, eval=F}
+if (!require("pacman", quietly = TRUE))
+    BiocManager::install("pacman")
+p_load("metacell")
+p_load("DropletUtils")
+
+```
+
+#### Metacells
+
+```{r, eval=F}
+
+sce_data<- DropletUtils::read10xCounts("10k_PBMC_3p_nextgem_Chromium_X_filtered_feature_bc_matrix.h5",sample.names = "pbmc")
+
+dir.create("PBMC_metacell", showWarnings = F)
+scdb_init("PBMC_metacell", force_reinit=T)
+mat_metacell <- scm_import_sce_to_mat(Seurat::as.SingleCellExperiment(seurat_data))
+scdb_add_mat("PBMC",mat_metacell)
+if(!dir.exists("figs_metacell")) dir.create("figs_metacell/")
+scfigs_init("figs_metacell/")
+
+```
+
+```{r, eval=F}
+dim(mat_metacell@mat)
+```
+
+```{r, eval=F}
+mat_metacell@cell_metadata %>% head()
+```
+
+```{r, eval=F}
+ig_genes <- c(grep("^IGJ", mat_metacell@genes, v=T), 
+                grep("^IGH",mat_metacell@genes,v=T),
+                grep("^IGK", mat_metacell@genes, v=T), 
+                grep("^IGL", mat_metacell@genes, v=T))
+
+bad_genes <- unique(c(grep("^MT-", mat_metacell@genes, v=T), grep("^MTMR", mat_metacell@genes, v=T), grep("^MTND", mat_metacell@genes, v=T),"NEAT1","TMSB4X", "TMSB10", ig_genes))
+
+mcell_mat_ignore_genes(new_mat_id="PBMC_clean", mat_id="PBMC", bad_genes, reverse=F)
+mcell_mat_ignore_small_cells("PBMC_clean_2", "PBMC_clean", 800) #threshold for UMIs per cell
+```
+
+```{r, eval=F}
+mcell_add_gene_stat(gstat_id="PBMC_gstat", mat_id="PBMC_clean_2", force=T)
+```
+
+```{r, eval=F}
+mat2 = scdb_gstat("PBMC_gstat")
+head(mat2)
+```
+
+```{r, eval=F}
+mcell_gset_filter_varmean(gset_id="PBMC_gstat_Feats", gstat_id="PBMC_gstat", T_vm=0.08, force_new=T)
+mcell_gset_filter_cov(gset_id = "PBMC_gstat_Feats", gstat_id="PBMC_gstat", T_tot=100, T_top3=2)
+```
+
+The first command creates a new gene set with all genes for which the scaled variance is 0.08 and higher. The second command restrict this gene set to genes with at least 100 UMIs across the entire dataset, and also requires selected genes to have at least three cells for more than 2 UMIs were recorded.
+
+```{r, eval=F}
+mcell_plot_gstats(gstat_id="PBMC_gstat", gset_id="PBMC_gstat_Feats")
+```
+
+```{r, eval=F}
+mcell_add_cgraph_from_mat_bknn(mat_id="PBMC_clean_2", 
+                gset_id = "PBMC_gstat_Feats", 
+                graph_id="PBMC_graph",
+                K=100,
+                dsamp=T)
+```
+
+```{r, eval=F}
+mcell_coclust_from_graph_resamp(
+                coc_id="PBMC_coc500", 
+                graph_id="PBMC_graph",
+                min_mc_size=20, 
+                p_resamp=0.75, n_resamp=500)
+```
+
+```{r, eval=F}
+mcell_mc_from_coclust_balanced(
+                coc_id="PBMC_coc500", 
+                mat_id= "PBMC_clean_2",
+                mc_id= "PBMC_mc", 
+                K=30, min_mc_size=30, alpha=2)
+```
+
+```{r, eval=F}
+mcell_mc_split_filt(new_mc_id="PBMC_mc_filtered", 
+            mc_id="PBMC_mc", 
+            mat_id="PBMC_clean_2",
+            T_lfc=3, plot_mats=F)
+```
+
+```{r, eval=F}
+mcell_gset_from_mc_markers(gset_id="PBMC_markers", mc_id="PBMC_mc_filtered")
+```
+
+```{r, eval=F}
+mcell_mc_plot_marks(mc_id="PBMC_mc_filtered", gset_id="PBMC_markers", mat_id="PBMC_clean_2")
+```
+
+```{r, eval=F}
+
+mc_colorize_default("PBMC_mc")
+
+mcell_mc2d_force_knn(mc2d_id="PBMC_2dproj",mc_id="PBMC_mc",graph_id="PBMC_graph")
+
+tgconfig::set_param("mcell_mc2d_height",1000, "metacell")
+tgconfig::set_param("mcell_mc2d_width",1000, "metacell")
+mcell_mc2d_plot(mc2d_id="PBMC_2dproj")
+```

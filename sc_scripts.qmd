@@ -1,0 +1,724 @@
+---
+title: "SingleCell RNA-seq Workshop"
+author: "Luis P Iniguez"
+format: html
+editor: visual
+---
+
+## Load Packages
+
+```{r Setup,message=FALSE,warning=FALSE}
+
+if (!require("BiocManager", quietly = TRUE))
+    install.packages("BiocManager")
+if (!require("pacman", quietly = TRUE))
+    BiocManager::install("pacman")
+p_load("SingleCellExperiment")
+p_load("Seurat")
+p_load("hdf5r")
+p_load("DropletUtils")
+p_load("dplyr")
+p_load("scater")
+p_load("Matrix")
+p_load("scran")
+p_load("ggplot2")
+p_load("igraph")
+p_load("SingleR")
+p_load("celldex")
+#p_load("iSEE")
+p_load("Nebulosa")
+p_load("UpSetR")
+p_load("clustree")
+p_load("Rmagic")
+p_load("SeuratWrappers")
+p_load("CelliD")
+p_load("pheatmap")
+p_load("pals")
+p_load("readr")
+
+if (!require("devtools"))
+install.packages("devtools")
+if(!require("findPC"))
+devtools::install_github("haotian-zhuang/findPC")
+if(!require("SeuratWrappers"))
+remotes::install_github('satijalab/seurat-wrappers')
+
+```
+
+## Download Data and read it.
+
+```{r}
+
+system("wget -q https://cf.10xgenomics.com/samples/cell-exp/6.1.0/10k_PBMC_3p_nextgem_Chromium_X/10k_PBMC_3p_nextgem_Chromium_X_filtered_feature_bc_matrix.h5")
+
+
+sce_data<- DropletUtils::read10xCounts("10k_PBMC_3p_nextgem_Chromium_X_filtered_feature_bc_matrix.h5",sample.names = "pbmc")
+
+mat<-Seurat::Read10X_h5("10k_PBMC_3p_nextgem_Chromium_X_filtered_feature_bc_matrix.h5")
+seurat_data <- CreateSeuratObject(counts = mat, project = "pbmc", min.cells = 0, min.features =0)
+
+```
+
+### Explore datasets
+
+```{r}
+sce_data
+```
+
+```{r}
+seurat_data
+```
+
+```{r}
+colData(sce_data) %>% head()
+```
+
+```{r}
+rownames(sce_data) %>% head()
+```
+
+```{r}
+rowData(sce_data) %>% head()
+```
+
+```{r}
+rownames(seurat_data) %>% head()
+```
+
+```{r}
+identical(rownames(seurat_data), rowData(sce_data)$Symbol)
+```
+
+```{r}
+setdiff(rownames(seurat_data),rowData(sce_data)$Symbol)
+```
+
+```{r}
+grep("LINC01238", rownames(seurat_data),value=T)
+```
+
+```{r}
+rowData(sce_data)[which(rowData(sce_data)$Symbol == "LINC01238"),]
+```
+
+## Quality Control
+
+#### Seurat
+
+```{r}
+seurat_data[["Mitochondrial"]] <- PercentageFeatureSet(seurat_data, pattern = "^MT-")
+VlnPlot(seurat_data, features = c( "nCount_RNA","nFeature_RNA", "Mitochondrial"), ncol = 3,pt.size = 0.01,log = T)
+```
+
+#### Bioconductor
+
+```{r}
+is.mito <-grepl("^MT-", rowData(sce_data)$Symbol, perl = T) %>% which
+sce_data<-scater::addPerCellQC(sce_data,subsets=list("Mitochondrial"=is.mito))
+gridExtra::grid.arrange(
+    plotColData(sce_data, y="sum",) +
+        scale_y_log10() + ggtitle("Total count"),
+    plotColData(sce_data, y="detected") +
+        scale_y_log10() + ggtitle("Detected features"),
+    plotColData(sce_data, y="subsets_Mitochondrial_percent") + ggtitle("Mito percent")+scale_y_log10(),
+    ncol=3
+)
+```
+
+### Identify thresholds
+
+```{r}
+qc.lib2 <- scater::isOutlier(seurat_data$nCount_RNA, log=TRUE, type="lower",nmads=3) #sce_data$sum
+qc.nexprs2 <- isOutlier(seurat_data$nFeature_RNA, log=TRUE,nmads=3, type="lower") #sce_data$detected
+qc.mito2 <- isOutlier(seurat_data$Mitochondrial ,nmads=3,type="higher") #sce_data$subsets_Mitochondrial_percent
+discard2 <- qc.lib2 | qc.nexprs2  | qc.mito2
+
+```
+
+```{r}
+data.frame("Total count"=attr(qc.lib2, "thresholds"),
+"Detected features"=attr(qc.nexprs2, "thresholds"),
+"Mito percent"=attr(qc.mito2, "thresholds"))
+```
+
+```{r}
+data.frame("Total count"=sum(qc.lib2), "Detected features"=sum(qc.nexprs2),
+  "Mito percent"=sum(qc.mito2),"Total"=sum(discard2))
+```
+
+```{r}
+sce_data$discard<-discard2
+seurat_data$discard<-discard2
+gridExtra::grid.arrange(
+    plotColData(sce_data, y="sum",colour_by="discard") +
+        scale_y_log10() + ggtitle("Total count"),
+    plotColData(sce_data, y="detected",colour_by="discard") +
+        scale_y_log10() + ggtitle("Detected features"),
+    plotColData(sce_data, y="subsets_Mitochondrial_percent",colour_by="discard") + ggtitle("Mito percent")+scale_y_log10(),
+    ncol=3
+)
+```
+
+```{r}
+seurat_data<-subset(seurat_data,subset= discard!=TRUE)
+sce_data<-sce_data[,!sce_data$discard]
+```
+
+## Normalization
+
+#### Seurat
+
+```{r, warning=F,}
+seurat_data <- NormalizeData(seurat_data, normalization.method = "LogNormalize", scale.factor = 10000, verbose=F)
+seurat_data <- SCTransform(seurat_data, verbose=F) #could regress for multiple factors, including batch
+```
+
+```{r}
+Assays(seurat_data)
+```
+
+```{r}
+DefaultAssay(seurat_data)
+```
+
+```{r}
+colSums(GetAssayData(seurat_data,slot = "counts")[,1:5])
+```
+
+```{r}
+colSums(GetAssayData(seurat_data,slot = "data")[,1:5])
+```
+
+```{r}
+colSums(GetAssayData(seurat_data,assay = "RNA",slot = "counts")[,1:5])
+```
+
+```{r}
+colSums(GetAssayData(seurat_data,assay = "RNA",slot = "data")[,1:5])
+```
+
+#### Bioconductor
+
+::: callout-warning
+## Warning:
+
+Might take a little bit!
+:::
+
+```{r}
+set.seed(1000)
+clusters <- scran::quickCluster(sce_data)
+sce_data <- scran::computeSumFactors(sce_data, cluster=clusters)
+sce_data <- scater::logNormCounts(sce_data)
+```
+
+```{r}
+assayNames(sce_data)
+```
+
+```{r}
+colSums(logcounts(sce_data)[,1:5])
+```
+
+## Feature Selection
+
+#### Seurat
+
+```{r}
+
+DefaultAssay(seurat_data)<-"RNA"
+seurat_data <- FindVariableFeatures(seurat_data, assay="RNA",selection.method = "vst", nfeatures = 2000, verbose=F)
+
+top10 <- head(VariableFeatures(seurat_data), 10)
+plot1 <- VariableFeaturePlot(seurat_data)
+LabelPoints(plot = plot1, points = top10, repel = TRUE)+theme(legend.position = "none")
+
+
+```
+
+#### Bioconductor
+
+```{r}
+dec.pbmc <- modelGeneVar(sce_data)
+chosen <- getTopHVGs(dec.pbmc, n=2000)
+rowSubset(sce_data) <- chosen
+
+fit.pbmc <- metadata(dec.pbmc)
+plot2<-data.frame(mean=fit.pbmc$mean,var=fit.pbmc$var, color=rownames(sce_data)%in% chosen)%>%
+ggplot(aes(x=mean,y=var))+geom_point(aes(color=color))+scale_color_manual(values = c("black","red"))+geom_function(color="dodgerblue",fun =fit.pbmc$trend ,size=1.5)+theme(legend.position = "none")#+scale_x_continuous(trans='log2')+scale_y_continuous(trans='log2')
+
+t<-which(rownames(sce_data)%in% chosen[1:10])
+td<-data.frame(mean=fit.pbmc$mean[t],var=fit.pbmc$var[t],symbol=rowData(sce_data)$Symbol[t])
+plot2+ggrepel::geom_text_repel(data=td,aes(label=symbol))+ylab("Variance of log-expression")+xlab("Mean of log-expression")
+
+```
+
+## Dimension Reduction
+
+### PCA
+
+#### Seurat
+
+```{r}
+all.genes <- rownames(seurat_data)
+seurat_data <- ScaleData(seurat_data, features = all.genes)
+seurat_data <- RunPCA(seurat_data,
+                      features = VariableFeatures(object = seurat_data),
+                      verbose = F,npcs = 50)
+DimPlot(seurat_data,reduction =  "pca",)
+```
+
+```{r}
+ElbowPlot(seurat_data)
+```
+
+```{r}
+stdev_pca_seurat<-seurat_data@reductions$pca@stdev 
+findPC(sdev = stdev_pca_seurat,number = c(30,40,50),method = 'all',figure = T)
+
+```
+
+#### Bioconductor
+
+```{r}
+sce_data <- runPCA(sce_data,ncomponents = 50)
+plotPCA(sce_data)
+```
+
+```{r}
+stdev_pca_sce <- attr(reducedDim(sce_data, "PCA"),
+  "varExplained") %>% sqrt()
+
+plot(stdev_pca_sce)
+```
+
+```{r}
+findPC(sdev = stdev_pca_sce,number = c(30,40,50),method = 'all',figure = T)
+```
+
+I choose 11 PC.
+
+### TSNE
+
+#### Seurat
+
+```{r}
+seurat_data <- RunTSNE(seurat_data, dims = 1:11,reduction = "pca")
+DimPlot(seurat_data, reduction = "tsne")
+```
+
+```{r}
+sce_data <- runTSNE(sce_data, dimred="PCA",n_dimred=11)
+plotReducedDim(sce_data, dimred="TSNE")
+```
+
+```{r}
+sce_data <- runTSNE(sce_data, dimred="PCA",n_dimred=11,perplexity=5)
+plotReducedDim(sce_data, dimred="TSNE")
+```
+
+```{r}
+sce_data <- runTSNE(sce_data, dimred="PCA",n_dimred=11,perplexity=20)
+plotReducedDim(sce_data, dimred="TSNE")
+```
+
+```{r}
+sce_data <- runTSNE(sce_data, dimred="PCA",n_dimred=11,perplexity=80)
+plotReducedDim(sce_data, dimred="TSNE")
+```
+
+### UMAP
+
+#### Seurat
+
+```{r}
+seurat_data <- RunUMAP(seurat_data, dims = 1:11,reduction = "pca",verbose = F)
+DimPlot(seurat_data, reduction = "umap")
+```
+
+```{r}
+seurat_data <- RunUMAP(seurat_data, dims = 1:11,reduction = "pca",verbose = F,n.neighbors = 5)
+DimPlot(seurat_data, reduction = "umap")
+```
+
+```{r}
+seurat_data <- RunUMAP(seurat_data, dims = 1:11,reduction = "pca",verbose = F,n.neighbors = 50)
+DimPlot(seurat_data, reduction = "umap")
+```
+
+```{r}
+seurat_data <- RunUMAP(seurat_data, dims = 1:11,reduction = "pca",verbose = F,n.neighbors = 100)
+DimPlot(seurat_data, reduction = "umap")
+```
+
+```{r}
+set.seed(05122022)
+sce_data <- runUMAP(sce_data, dimred="PCA",n_dimred=11)
+plotReducedDim(sce_data, dimred="UMAP")
+```
+
+## Clustering
+
+#### Seurat
+
+```{r}
+seurat_data <- FindNeighbors(seurat_data, dims = 1:11)
+seurat_data <- FindClusters(seurat_data, resolution = 0.5)
+
+DimPlot(seurat_data, reduction = "umap")
+```
+
+```{r}
+seurat_data <- FindClusters(seurat_data, resolution = 1.5)
+DimPlot(seurat_data, reduction = "umap")
+```
+
+```{r}
+seurat_data <- FindClusters(seurat_data, resolution = 0.1)
+DimPlot(seurat_data, reduction = "umap")
+```
+
+#### Bioconductor
+
+```{r}
+g <- buildSNNGraph(sce_data, k=11, use.dimred = "PCA")
+clust <- igraph::cluster_walktrap(g)$membership
+sce_data$cluster_rank_walktrap <- factor(clust)
+plotReducedDim(sce_data, "UMAP", colour_by="cluster_rank_walktrap")
+```
+
+```{r}
+reducedDim(sce_data,"UMAP") %>% cbind(colData(sce_data)) %>%
+  as_tibble %>%
+  ggplot(aes(x=V1,y=V2))+
+  geom_point(aes(color=cluster_rank_walktrap), size=0.2)+
+  cowplot::theme_cowplot(12)+
+  guides(color = guide_legend(override.aes = list(size=2)))+
+  ylab("UMAP_2")+xlab("UMAP_1")
+
+```
+
+Clustering like Seurat and playing with resolution
+
+```{r}
+g <- buildSNNGraph(sce_data, k=11, use.dimred = "PCA",type = "jaccard")
+clust2 <- igraph::cluster_louvain(g, resolution = 0.5)$membership
+sce_data$cluster_0.5 <- factor(clust2)
+plotReducedDim(sce_data, "UMAP", colour_by="cluster_0.5")
+```
+
+```{r}
+clust2 <- igraph::cluster_louvain(g, resolution = 0.1)$membership
+sce_data$cluster_0.1 <- factor(clust2)
+plotReducedDim(sce_data, "UMAP", colour_by="cluster_0.1")
+```
+
+```{r}
+clust2 <- igraph::cluster_louvain(g, resolution = 1.5)$membership
+sce_data$cluster_1.5 <- factor(clust2)
+plotReducedDim(sce_data, "UMAP", colour_by="cluster_1.5")
+```
+
+##### Cluster Behavior
+
+```{r}
+colors<-scater:::.get_palette("tableau10medium")
+```
+
+Silhouette width
+
+```{r}
+sil.approx <- bluster::approxSilhouette(reducedDim(sce_data, "PCA"), clusters=sce_data$cluster_0.5)
+sil.data <- as.data.frame(sil.approx)
+sil.data$closest <- factor(ifelse(sil.data$width > 0, sce_data$cluster_0.5, sil.data$other))
+sil.data$cluster <- sce_data$cluster_0.5
+ggplot(sil.data, aes(x=cluster, y=width, colour=closest)) +
+    ggbeeswarm::geom_quasirandom(method="smiley")+
+  scale_color_manual(values = colors)
+```
+
+Cluster purity
+
+```{r}
+pure.pbmc <- bluster::neighborPurity(reducedDim(sce_data, "PCA"), sce_data$cluster_0.5)
+pure.data <- as.data.frame(pure.pbmc)
+pure.data$maximum <- factor(pure.data$maximum)
+pure.data$cluster <- sce_data$cluster_0.5
+ggplot(pure.data, aes(x=cluster, y=purity, colour=maximum)) +
+    ggbeeswarm::geom_quasirandom(method="smiley")+
+  scale_color_manual(values = colors)
+```
+
+##### Comparing Clusters
+
+```{r}
+tab <- table("Walktrap"=sce_data$cluster_rank_walktrap, "Louvain"=sce_data$cluster_0.5)
+rownames(tab) <- paste("Walktrap", rownames(tab))
+colnames(tab) <- paste("Louvain", colnames(tab))
+
+pheatmap::pheatmap(log10(tab+10), color=viridis::viridis(100), cluster_cols=FALSE, cluster_rows=FALSE)
+```
+
+```{r}
+jacc.mat <- bluster::linkClustersMatrix(sce_data$cluster_rank_walktrap, sce_data$cluster_0.5)
+rownames(jacc.mat) <- paste("Walktrap", rownames(jacc.mat))
+colnames(jacc.mat) <- paste("Louvain", colnames(jacc.mat))
+pheatmap::pheatmap(jacc.mat, color=viridis::viridis(100), cluster_cols=FALSE, cluster_rows=FALSE)
+```
+
+```{r}
+mat_clust<-data.frame("res_0.1"=sce_data$cluster_0.1, "res_0.5"=sce_data$cluster_0.5,"res_1.5"=sce_data$cluster_1.5)
+set.seed(1111)
+clustree(mat_clust, prefix="res_")
+
+```
+
+## Markers (Seurat Object)
+
+#### Cluster 1 vs Cluster 2
+
+```{r}
+Idents(seurat_data)<-seurat_data$RNA_snn_res.0.5
+seurat_data_filt<-seurat_data[rowSums(seurat_data@assays$RNA@counts >0 ) > 50,]
+
+de_1_2<-FindMarkers(seurat_data_filt, ident.1 =1,ident.2=2,min.pct = 0.25, logfc.threshold = 0.25)
+ggplot(de_1_2,aes(x=avg_log2FC, y=-log10(p_val_adj)))+geom_point(aes(color=pct.1))+
+  scale_color_gradient(low="black",high = "magenta")
+
+```
+
+#### Find All Markers one vs the rest
+
+```{r}
+seurat.markers <- FindAllMarkers(seurat_data_filt, only.pos = TRUE,
+                                 min.pct = 0.50, logfc.threshold = 0.5)
+head(seurat.markers)
+```
+
+#### Comparing clusters by pairs
+
+```{r}
+marker.info <- scoreMarkers(seurat_data_filt@assays$RNA@data, seurat_data_filt$RNA_snn_res.0.5)
+
+```
+
+```{r}
+length(marker.info)
+```
+
+```{r}
+sapply(marker.info, dim)
+```
+
+```{r}
+head(marker.info$'0')
+```
+
+```{r}
+colnames(marker.info$'0')
+```
+
+```{r}
+marker.info$'3' %>% as_tibble(rownames = "Gene") %>%arrange(rank.AUC) %>% filter(rank.AUC==1) %>% as.data.frame()
+```
+
+```{r}
+g<-"MNDA"
+seurat_data_filt@assays$RNA@data[g,] %>% as_tibble(rownames = "Cell") %>% left_join(as_tibble(seurat_data_filt[[]], rownames="Cell"), by=c("Cell")) %>%
+    ggplot(aes(x=RNA_snn_res.0.5, y=value))+geom_violin(scale = "width", adjust=1)+
+    ggbeeswarm::geom_quasirandom(size=0.1, aes(color=RNA_snn_res.0.5))+
+  theme(legend.position = "none")
+```
+
+Rank means: is the smallest rank of each gene across all pairwise comparisons;If a gene has a small min-rank, we can conclude that it is one of the top upregulated genes in at least one comparison of cluster of interest to another cluster
+
+On some occasions, ranking by the minimum can be highly effective as it yields a concise set of highly cluster-specific markers.
+
+```{r}
+genes_c7<-marker.info$'7' %>% as_tibble(rownames = "Gene") %>% filter(rank.logFC.cohen<=5) %>% .$Gene
+plotGroupedHeatmap(Seurat::as.SingleCellExperiment(seurat_data), features=genes_c7, group="RNA_snn_res.0.5", 
+    center=TRUE, zlim=c(-3, 3))
+```
+
+```{r}
+plotDots(Seurat::as.SingleCellExperiment(seurat_data), genes_c7, group="RNA_snn_res.0.5")+scale_color_gradient(low = "white", high = "orange") 
+```
+
+## Visualizations
+
+```{r}
+markers.to.plot <- seurat.markers %>% group_by(cluster) %>% slice_head(n=2) %>% .$gene %>% unique
+DotPlot(seurat_data, features = markers.to.plot, cols=c("white","orange")) +
+    RotatedAxis()
+```
+
+```{r}
+markers.to.plot <- seurat.markers %>% group_by(cluster) %>% slice_head(n=5) %>% .$gene %>% unique
+DoHeatmap(subset(seurat_data, downsample = 100), features = markers.to.plot, size = 3)
+```
+
+```{r}
+table(seurat.markers$cluster)
+
+```
+
+```{r}
+list_genes<-seurat.markers %>% group_by(cluster) %>% summarise(genes=list(gene)) %>% .$genes
+names(list_genes)<-paste0("Cluster_", unique(seurat.markers$cluster))
+
+
+upset(fromList(list_genes),nsets = length(names(list_genes)),order.by = "freq")
+```
+
+```{r}
+genes2plot<-seurat.markers %>% as_tibble() %>% group_by(cluster) %>% arrange(desc(avg_log2FC)) %>% slice_head(n=1) %>% .$gene %>% unique()
+VlnPlot(seurat_data, features = genes2plot, pt.size = 0)
+```
+
+```{r}
+RidgePlot(seurat_data,features = "LYZ")
+```
+
+```{r}
+FeaturePlot(seurat_data,features = c("CD4", "CCR7")) 
+```
+
+```{r}
+FeaturePlot(seurat_data, features = c("CD4", "CCR7"), blend = TRUE)
+```
+
+```{r}
+Nebulosa::plot_density(seurat_data, c("CD4", "CCR7"))
+
+```
+
+```{r}
+Nebulosa::plot_density(seurat_data, c("CD4", "CCR7"), joint = T)
+```
+
+#### Magic
+
+::: callout-warning
+## IMPORTANT WARNING
+
+This might take a lot of memory
+:::
+
+```{r}
+# seurat_data_filt <- magic(seurat_data_filt)
+# seurat_data_filt <- SeuratWrappers::RunALRA(seurat_data_filt)
+# saveRDS(seurat_data_filt,"seurat_withMagic_ALRA.RDS")
+seurat_data_filt<-readRDS("seurat_withMagic_ALRA.RDS")
+
+(VlnPlot(seurat_data_filt, features=c("CD4"),assay="RNA")+ theme(legend.position = "none")+ggtitle("LogNormalize"))+
+(VlnPlot(seurat_data_filt, features=c("CD4"), assay="MAGIC_RNA")+theme(legend.position = "none")+ggtitle("MAGIC"))+
+(VlnPlot(seurat_data_filt, features=c("CD4"), assay="alra")+theme(legend.position = "none")+ggtitle("ALRA"))
+
+```
+
+```{r}
+seurat_data_filt@active.assay <- 'MAGIC_RNA'
+a<-FeaturePlot(seurat_data_filt, features = c("CD4"))+ scale_color_viridis_c(option = "C")
+b<-FeaturePlot(seurat_data_filt, features = c("CCR7"))+ scale_color_viridis_c(option = "C")
+seurat_data_filt@active.assay <- 'alra'
+a1<-FeaturePlot(seurat_data_filt, features = c("CD4"))+ scale_color_viridis_c(option = "C")
+b1<-FeaturePlot(seurat_data_filt, features = c("CCR7"))+ scale_color_viridis_c(option = "C")
+seurat_data_filt@active.assay <- 'RNA'
+a2<-FeaturePlot(seurat_data_filt, features = c("CD4"))+ scale_color_viridis_c(option = "C")
+b2<-FeaturePlot(seurat_data_filt, features = c("CCR7"))+ scale_color_viridis_c(option = "C")
+
+
+cowplot::plot_grid(a2,b2,a,b,a1,b1,ncol=2)
+
+```
+
+## Cluster Annotation
+
+#### SingleR
+
+```{r}
+ref <- celldex::BlueprintEncodeData()
+rownames(sce_data)<-rowData(sce_data)$Symbol
+
+
+pred <- SingleR::SingleR(test=sce_data, ref=ref, labels=ref$label.main)
+
+
+plotScoreHeatmap(pred)
+```
+
+```{r}
+tab <- table(Assigned=pred$pruned.labels, Cluster=sce_data$cluster_0.5)
+pheatmap::pheatmap(log2(tab+1), color=colorRampPalette(c("white", "blue"))(101))
+
+```
+
+```{r}
+pred2 <- SingleR(test=sce_data, ref=ref, labels=ref$label.fine)
+tab <- table(Assigned=pred2$pruned.labels, Cluster=sce_data$cluster_0.5)
+pheatmap::pheatmap(log2(tab+1), color=colorRampPalette(c("white", "blue"))(101))
+```
+
+#### CelliD
+
+```{r}
+seurat_data_filt <-CelliD::RunMCA(seurat_data_filt)
+panglao <- readr::read_tsv("https://panglaodb.se/markers/PanglaoDB_markers_27_Mar_2020.tsv.gz")
+panglao_IS <- panglao %>% filter(organ == "Immune system") %>% 
+                filter(grepl("Hs",species)) %>%
+                group_by(`cell type`) %>% 
+                summarise(geneset = list(`official gene symbol`))
+panglao_IS <- setNames(panglao_IS$geneset, panglao_IS$`cell type`)
+lapply(panglao_IS[1:5],head)
+```
+
+```{r}
+HGT_gs <- RunCellHGT(seurat_data_filt, pathways = panglao_IS, dims = 1:50, n.features = 200)
+
+```
+
+```{r}
+dim(HGT_gs)
+```
+
+```{r}
+HGT_gs[1:5,1:5]
+```
+
+This is a matrix of benjamini hochberg adjusted pvalue pvalue or a sparse matrix of (-log10) benjamini hochberg adjusted pvalue
+
+```{r}
+# For each cell, assess the signature with the lowest corrected p-value (max -log10 corrected p-value)
+gs_prediction <- rownames(HGT_gs)[apply(HGT_gs, 2, which.max)]
+head(gs_prediction)
+```
+
+```{r}
+# For each cell, evaluate if the lowest p-value is significant
+gs_prediction_signif <- ifelse(apply(HGT_gs, 2, max)>2, yes = gs_prediction, "unassigned") #pvalue<0.01
+
+# Save cell type predictions as metadata within the Seurat object
+seurat_data_filt$CellID_prediction <- gs_prediction_signif
+```
+
+```{r}
+DimPlot(seurat_data_filt,reduction =  "umap",group.by = "RNA_snn_res.0.5")
+DimPlot(seurat_data_filt,reduction =  "umap",group.by = "CellID_prediction" )
+```
+
+```{r}
+tab <- table(Assigned=seurat_data_filt$CellID_prediction, Cluster=seurat_data_filt$RNA_snn_res.0.5)
+tab %>% as.data.frame() %>% ggplot(aes(x=Cluster, y=Freq))+ geom_bar(position = "fill", aes(fill=Assigned), stat="identity")+scale_fill_manual(values=unname(pals::alphabet2(22)))
+
+
+
+
+
+```
+
+## iSEE
+
+```{r, eval=FALSE}
+rownames(sce_data)<-rowData(sce_data)$ID
+iSEE(sce_data)
+```
